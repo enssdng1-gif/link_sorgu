@@ -3,10 +3,14 @@ import re
 import requests
 import time
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from threading import Thread
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+
+executor = ThreadPoolExecutor(max_workers=4)
 
 # --- AYARLAR KISMI ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -248,18 +252,30 @@ async def instagram_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = context.args[0].replace("@", "").strip()
 
     processing_msg = await update.message.reply_text(
-        f"🔍 *@{username}* hesabı sorgulanıyor, lütfen bekleyin...",
+        f"🔍 *@{username}* hesabı sorgulanıyor...",
         parse_mode='Markdown'
     )
 
-    data, error = get_instagram_profile(username)
+    try:
+        # Maksimum 20 saniye bekle, sonra timeout ver
+        loop = asyncio.get_event_loop()
+        data, error = await asyncio.wait_for(
+            loop.run_in_executor(executor, get_instagram_profile, username),
+            timeout=20.0
+        )
+    except asyncio.TimeoutError:
+        await processing_msg.edit_text(
+            "⏱️ *Zaman aşımı!* Instagram API 20 saniyede cevap vermedi.\n\n"
+            "Lütfen birkaç saniye bekleyip tekrar deneyin.",
+            parse_mode='Markdown'
+        )
+        return
 
     if error:
         await processing_msg.edit_text(error, parse_mode='Markdown')
         return
 
     msg, profile_pic = build_profile_message(data)
-
     await processing_msg.delete()
 
     if profile_pic:
