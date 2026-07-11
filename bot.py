@@ -3,10 +3,11 @@ import re
 import requests
 import time
 import os
+import html
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder, ContextTypes,
     CommandHandler, MessageHandler,
@@ -34,10 +35,6 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def index():
     return "Bot aktif!", 200
-
-@flask_app.route("/healthz")
-def health():
-    return "OK", 200
 
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, use_reloader=False)
@@ -97,14 +94,14 @@ def vt_scan(url: str) -> str:
                 if res.get("category") in ("malicious","suspicious")
             ][:5]
             t_str = "\n".join(threats)
-            msg  = "🚨 *TEHLİKELİ LİNK TESPİT EDİLDİ!*\n\n"
-            msg += f"🔗 `{url}`\n"
-            msg += f"📊 {total} tarayıcıdan *{mal+sus}* tanesi zararlı buldu!\n\n"
-            msg += f"*Tespit edilenler:*\n{t_str}\n\n"
+            msg  = "🚨 <b>TEHLİKELİ LİNK TESPİT EDİLDİ!</b>\n\n"
+            msg += f"🔗 <code>{html.escape(url)}</code>\n"
+            msg += f"📊 {total} tarayıcıdan <b>{mal+sus}</b> tanesi zararlı buldu!\n\n"
+            msg += f"<b>Tespit edilenler:</b>\n{html.escape(t_str)}\n\n"
             msg += "⛔ Bu linke KESİNLİKLE tıklamayın!"
         else:
-            msg  = "✅ *Link Temiz Görünüyor*\n\n"
-            msg += f"🔗 `{url}`\n"
+            msg  = "✅ <b>Link Temiz Görünüyor</b>\n\n"
+            msg += f"🔗 <code>{html.escape(url)}</code>\n"
             msg += f"📊 {total} güvenlik şirketi taradı, tehlike bulunamadı."
         return msg
 
@@ -128,9 +125,8 @@ def ig_fetch(username: str):
             params={"username_or_id": username},
             timeout=12
         )
-        log.info("IG status: %s | body: %s", r.status_code, r.text[:300])
         if r.status_code == 404:
-            return None, f"❌ *@{username}* bulunamadı."
+            return None, f"❌ <b>@{html.escape(username)}</b> bulunamadı."
         if r.status_code == 403:
             return None, "⚠️ API erişim reddedildi. Anahtar geçersiz olabilir."
         if r.status_code == 429:
@@ -143,9 +139,7 @@ def ig_fetch(username: str):
         return None, "⏱️ Instagram API 12 saniyede yanıt vermedi. Tekrar deneyin."
     except Exception as e:
         log.error("IG hata: %s", e)
-        return None, f"⚠️ Hata: {str(e)[:80]}"
-
-import html
+        return None, f"⚠️ Hata oluştu."
 
 def build_ig_msg(data: dict):
     uname    = html.escape(str(data.get("username") or "?"))
@@ -158,75 +152,94 @@ def build_ig_msg(data: dict):
     verified = data.get("is_verified", False)
     pic      = data.get("profile_pic_url_hd") or data.get("profile_pic_url") or ""
     website  = html.escape(str(data.get("external_url") or data.get("website") or ""))
+    
+    # Yeni Detaylar
+    category = html.escape(str(data.get("category_name") or data.get("category") or ""))
+    is_biz   = data.get("is_business", False)
+    email    = html.escape(str(data.get("public_email") or ""))
+    phone    = html.escape(str(data.get("public_phone_number") or data.get("contact_phone_number") or ""))
+    
+    # Çoklu Linkler
+    bio_links = data.get("bio_links", [])
+    extra_links = []
+    for link in bio_links:
+        url = link.get("url")
+        if url and url != website:
+            extra_links.append(html.escape(url))
 
     badge   = " ✅" if verified else ""
     privacy = "🔒 Gizli" if private else "🌍 Açık"
+    biz_txt = "🏢 İşletme/İçerik Üretici" if is_biz else "👤 Kişisel Hesap"
 
     lines = [
         "📸 <b>Instagram Profil Raporu</b>",
         "━━━━━━━━━━━━━━━━━",
         f"👤 <b>Ad:</b> {name}{badge}",
         f"🔖 <b>Kullanıcı:</b> @{uname}",
-        f"🔐 <b>Hesap:</b> {privacy}",
+        f"🔐 <b>Durum:</b> {privacy} | {biz_txt}"
+    ]
+    
+    if category and category != "None":
+        lines.append(f"🏷️ <b>Kategori:</b> {category}")
+        
+    lines += [
         "━━━━━━━━━━━━━━━━━",
         f"👥 <b>Takipçi:</b> {followers}",
         f"➡️ <b>Takip:</b> {following}",
         f"🖼️ <b>Gönderi:</b> {posts}",
     ]
+    
+    if email or phone:
+        lines.append("━━━━━━━━━━━━━━━━━")
+        if email: lines.append(f"📧 <b>E-posta:</b> {email}")
+        if phone: lines.append(f"☎️ <b>Telefon:</b> {phone}")
+
     if bio:
-        lines += ["━━━━━━━━━━━━━━━━━", f"📝 <b>Bio:</b> {bio}"]
-    if website:
-        lines.append(f"🔗 {website}")
+        lines += ["━━━━━━━━━━━━━━━━━", f"📝 <b>Biyografi:</b>\n{bio}"]
+        
+    if website or extra_links:
+        lines.append("━━━━━━━━━━━━━━━━━")
+        if website:
+            lines.append(f"🔗 <b>Web Sitesi:</b> {website}")
+        for idx, elink in enumerate(extra_links[:3]): # Sadece ilk 3 ekstra linki göster
+            lines.append(f"🔗 <b>Bağlantı {idx+1}:</b> {elink}")
+
     lines.append(f"\n<a href='https://www.instagram.com/{uname}/'>Profili Görüntüle</a>")
     return "\n".join(lines), pic
 
-# ── /start ─────────────────────────────────────────────────────
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ── KOMUTLAR ───────────────────────────────────────────────────
+
+async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/menu ve /start komutu"""
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Link Güvenlik Taraması", callback_data="info_link")],
-        [InlineKeyboardButton("📸 Instagram Profil Sorgula", callback_data="info_ig")],
+        [InlineKeyboardButton("🔗 Link Sorgula", callback_data="info_link")],
+        [InlineKeyboardButton("📸 Insta Sorgula", callback_data="info_ig")],
     ])
     await update.message.reply_text(
-        "👋 *Merhaba! Ben Güvenlik & Sorgulama Botuyum.*\n\n"
-        "Ne yapmak istersiniz?",
-        parse_mode="Markdown",
+        "👋 <b>Ana Menüye Hoş Geldiniz!</b>\n\n"
+        "Ne yapmak istersiniz?\n\n"
+        "👉 <code>/ig kullanıcı_adı</code> : Instagram profil analizi\n"
+        "👉 <code>/link</code> : URL/Link güvenlik analizi\n"
+        "👉 <code>/reset</code> : Sohbet ekranını temizle",
+        parse_mode="HTML",
         reply_markup=kb
     )
 
-# ── Buton geri çağrıları ───────────────────────────────────────
-async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-
-    if q.data == "info_link":
-        await q.edit_message_text(
-            "🔗 *Link Güvenlik Taraması*\n\n"
-            "Bana herhangi bir linki *mesaj olarak* gönderin.\n\n"
-            "Örnek:\n`https://suphelisite.com`\n\n"
-            "70+ güvenlik şirketi ile analiz edip sonucu bildiririm.",
-            parse_mode="Markdown"
-        )
-    elif q.data == "info_ig":
-        await q.edit_message_text(
-            "📸 *Instagram Profil Sorgulama*\n\n"
-            "Komut: `/ig kullanici_adi`\n\n"
-            "Örnek:\n`/ig cristiano`\n\n"
-            "Takipçi, gönderi, biyografi ve profil fotoğrafını getiririm.",
-            parse_mode="Markdown"
-        )
-
-# ── /ig komutu ─────────────────────────────────────────────────
 async def cmd_ig(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/ig komutu"""
     if not ctx.args:
         await update.message.reply_text(
-            "📸 Kullanım: `/ig kullanici_adi`\nÖrnek: `/ig cristiano`",
-            parse_mode="Markdown"
+            "📸 <b>Instagram Sorgulama Modu</b>\n\n"
+            "Lütfen komutun yanına kullanıcı adını yazın.\n\n"
+            "👉 <b>Örnek:</b> <code>/ig cristiano</code>\n"
+            "👉 <b>Örnek:</b> <code>/ig enexs.qx0</code>",
+            parse_mode="HTML"
         )
         return
 
     username = ctx.args[0].lstrip("@").strip()
     msg = await update.message.reply_text(
-        f"🔍 <b>@{html.escape(username)}</b> sorgulanıyor...",
+        f"🔍 <b>@{html.escape(username)}</b> tüm detaylarıyla sorgulanıyor...",
         parse_mode="HTML"
     )
 
@@ -238,16 +251,11 @@ async def cmd_ig(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             timeout=15.0
         )
     except asyncio.TimeoutError:
-        await msg.edit_text(
-            "⏱️ Instagram API 15 saniyede yanıt vermedi.\nLütfen tekrar deneyin.",
-            parse_mode="HTML"
-        )
+        await msg.edit_text("⏱️ <b>Zaman aşımı!</b> Instagram API yanıt vermedi.", parse_mode="HTML")
         return
 
     if err:
-        # Hata mesajlarındaki Markdown işaretlerini temizleyelim veya HTML uyumlu gönderelim
-        err_clean = err.replace("*", "<b>").replace("❌ <b>@", "❌ <b>@").replace("</b> bulunamadı.", "</b> bulunamadı.")
-        await msg.edit_text(err_clean, parse_mode="HTML")
+        await msg.edit_text(err, parse_mode="HTML")
         return
 
     text, pic = build_ig_msg(data)
@@ -260,7 +268,49 @@ async def cmd_ig(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             log.warning("Fotoğraf gönderilemedi: %s", e)
 
-    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=False)
+    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+
+async def cmd_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/link komutu"""
+    await update.message.reply_text(
+        "🔗 <b>Link Sorgulama Modu</b>\n\n"
+        "Lütfen taramak istediğiniz linki doğrudan mesaj olarak gönderin.\n\n"
+        "👉 <b>Örnek:</b> <code>https://testsafebrowsing.appspot.com/s/malware.html</code>",
+        parse_mode="HTML"
+    )
+
+async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/reset komutu - Telegram'da eski mesajları silmek botlar için kısıtlıdır, bu yüzden temiz bir sayfa açar."""
+    # Bot sadece kendi mesajlarını ve eğer admin yetkisi varsa silebilir.
+    # Özel mesajda kullanıcının mesajlarını silemez. Bu yüzden bol boşluk bırakarak ekranı temizliyoruz.
+    blank_space = ".\n" * 50
+    await update.message.reply_text(
+        f"{blank_space}🧹 <b>Sohbet Temizlendi!</b>\n\n"
+        "Menüyü görmek için /menu yazabilirsiniz.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+# ── Buton Geri Çağrıları ───────────────────────────────────────
+async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if q.data == "info_link":
+        await q.edit_message_text(
+            "🔗 <b>Link Güvenlik Taraması</b>\n\n"
+            "Bana herhangi bir linki <b>mesaj olarak</b> gönderin.\n\n"
+            "Örnek:\n<code>https://suphelisite.com</code>\n\n"
+            "VirusTotal üzerinden tarayıp sonucu bildiririm.",
+            parse_mode="HTML"
+        )
+    elif q.data == "info_ig":
+        await q.edit_message_text(
+            "📸 <b>Instagram Profil Sorgulama</b>\n\n"
+            "Komut: <code>/ig kullanici_adi</code>\n\n"
+            "Örnek:\n<code>/ig cristiano</code>",
+            parse_mode="HTML"
+        )
 
 # ── Metin mesajları (link tarama) ──────────────────────────────
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -269,41 +319,41 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not urls:
         await update.message.reply_text(
-            "ℹ️ Mesajınızda link bulamadım.\n\n"
-            "• Link taramak için `http://` veya `https://` ile başlayan bir link gönderin.\n"
-            "• Instagram için `/ig kullanici_adi` yazın.\n"
-            "• Menü için /start yazın.",
-            parse_mode="Markdown"
+            "ℹ️ Mesajınızda geçerli bir link bulamadım.\n\n"
+            "👉 Link taramak için <code>http://</code> ile başlayan bir mesaj atın.\n"
+            "👉 Instagram için <code>/ig kullanici_adi</code> yazın.\n"
+            "👉 Menü için /menu yazın.",
+            parse_mode="HTML"
         )
         return
 
     target = urls[0]
     msg = await update.message.reply_text(
-        f"🔍 Link analiz ediliyor...\n`{target}`",
-        parse_mode="Markdown"
+        f"🔍 Link Virustotal'de analiz ediliyor...\n<code>{html.escape(target)}</code>\n\n<i>(Bu işlem yaklaşık 30 saniye sürebilir, lütfen bekleyin...)</i>",
+        parse_mode="HTML"
     )
 
     import asyncio
     report = await asyncio.get_event_loop().run_in_executor(executor, vt_scan, target)
-    await msg.edit_text(report, parse_mode="Markdown")
+    await msg.edit_text(report, parse_mode="HTML")
 
 # ── Ana giriş noktası ──────────────────────────────────────────
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
         raise SystemExit("HATA: TELEGRAM_BOT_TOKEN eksik!")
-    if not VT_API_KEY:
-        log.warning("VIRUSTOTAL_API_KEY eksik — link tarama çalışmaz.")
-    if not RAPID_API_KEY:
-        log.warning("RAPIDAPI_KEY eksik — Instagram sorgusu çalışmaz.")
-
+    
     Thread(target=run_flask, daemon=True).start()
-    log.info("Flask sunucu başlatıldı (port %s)", PORT)
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("ig",    cmd_ig))
+    
+    # Yeni Komutlar eklendi
+    app.add_handler(CommandHandler(["start", "menu", "menü"], cmd_menu))
+    app.add_handler(CommandHandler("ig", cmd_ig))
+    app.add_handler(CommandHandler("link", cmd_link))
+    app.add_handler(CommandHandler("reset", cmd_reset))
+    
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    log.info("Bot polling başlatıldı!")
+    log.info("Bot başlatıldı!")
     app.run_polling(drop_pending_updates=True)
