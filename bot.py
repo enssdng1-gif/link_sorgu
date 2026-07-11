@@ -229,14 +229,15 @@ async def cmd_ig(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     import asyncio
+    loop = asyncio.get_running_loop()
     try:
         data, err = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(executor, ig_fetch, username),
-            timeout=12.0
+            loop.run_in_executor(executor, ig_fetch, username),
+            timeout=15.0
         )
     except asyncio.TimeoutError:
         await msg.edit_text(
-            "⏱️ Instagram API 12 saniyede yanıt vermedi.\nLütfen birkaç saniye bekleyip tekrar deneyin.",
+            "⏱️ Instagram API 15 saniyede yanıt vermedi.\nLütfen tekrar deneyin.",
             parse_mode="Markdown"
         )
         return
