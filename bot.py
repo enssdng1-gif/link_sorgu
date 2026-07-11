@@ -209,12 +209,17 @@ def check_breach(email: str) -> str:
         return "⚠️ Hata oluştu."
 
 # ── IP OSINT ───────────────────────────────────────────────────
-def check_ip(ip: str) -> str:
+def check_ip(ip_query: str) -> str:
     try:
-        r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,city,isp,org,query", timeout=10)
+        # http:// veya https:// ile başlıyorsa temizle
+        clean_ip = ip_query.replace("http://", "").replace("https://", "").split("/")[0]
+
+        r = requests.get(f"http://ip-api.com/json/{clean_ip}?fields=status,message,country,city,isp,org,query", timeout=10)
         data = r.json()
         if data.get("status") != "success":
-            return f"❌ <b>Hata:</b> IP adresi çözümlenemedi."
+            if data.get("message") == "private range" or data.get("message") == "reserved range":
+                return f"⚠️ <b>Uyarı:</b> <code>{html.escape(ip_query)}</code> yerel/özel bir IP adresidir (Local IP). Sadece internete açık (Public) IP adresleri ve siteler sorgulanabilir."
+            return f"❌ <b>Hata:</b> <code>{html.escape(ip_query)}</code> adresi çözümlenemedi."
         
         msg = f"🌍 <b>IP Bilgi Raporu:</b> <code>{html.escape(data.get('query'))}</code>\n\n"
         msg += f"📍 <b>Konum:</b> {data.get('city', '?')}, {data.get('country', '?')}\n"
@@ -463,7 +468,16 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(report, parse_mode="HTML")
 
 async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document or update.message.photo[-1] if update.message.photo else None
+    doc = None
+    if update.message.document:
+        doc = update.message.document
+    elif update.message.photo:
+        doc = update.message.photo[-1]
+    elif update.message.video:
+        doc = update.message.video
+    elif update.message.audio:
+        doc = update.message.audio
+        
     if not doc: return
 
     # Dosya boyutu kontrolü (Telegram API genel bot indirme limiti 20MB'dır)
