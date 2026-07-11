@@ -4,6 +4,7 @@ import requests
 import time
 import os
 import html
+import asyncio
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask
@@ -28,8 +29,6 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 executor = ThreadPoolExecutor(max_workers=8)
-
-# ── Flask (Render'ın botu uyutmaması için) ─────────────────────
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
@@ -54,8 +53,16 @@ def fmt_num(n):
     except Exception:
         return str(n) if n else "?"
 
+# ── Kısaltılmış Link Çözücü ────────────────────────────────────
+def resolve_url(url: str) -> str:
+    try:
+        r = requests.head(url, allow_redirects=True, timeout=5)
+        return r.url
+    except Exception:
+        return url
+
 # ── VirusTotal ─────────────────────────────────────────────────
-def vt_scan(url: str) -> str:
+def vt_scan_url(url: str) -> str:
     if not VT_API_KEY:
         return "⚠️ VIRUSTOTAL_API_KEY eksik."
     headers = {"x-apikey": VT_API_KEY}
@@ -111,6 +118,121 @@ def vt_scan(url: str) -> str:
         log.error("VT hata: %s", e)
         return "⚠️ Link taranırken hata oluştu."
 
+def vt_scan_file(file_bytes: bytes, filename: str) -> str:
+    if not VT_API_KEY:
+        return "⚠️ VIRUSTOTAL_API_KEY eksik."
+    headers = {"x-apikey": VT_API_KEY}
+    try:
+        files = {"file": (filename, file_bytes)}
+        r = requests.post(
+            "https://www.virustotal.com/api/v3/files",
+            headers=headers,
+            files=files, timeout=30
+        )
+        r.raise_for_status()
+        analysis_id = r.json()["data"]["id"]
+
+        for _ in range(15):
+            time.sleep(4)
+            ar = requests.get(
+                f"https://www.virustotal.com/api/v3/analyses/{analysis_id}",
+                headers=headers, timeout=10
+            )
+            ar.raise_for_status()
+            d = ar.json()["data"]
+            if d["attributes"]["status"] == "completed":
+                break
+
+        stats = d["attributes"]["stats"]
+        results = d["attributes"]["results"]
+        mal = stats.get("malicious", 0)
+        sus = stats.get("suspicious", 0)
+        total = sum(stats.values())
+
+        if mal + sus > 0:
+            threats = [
+                f"• {eng}: {res.get('result','?')}"
+                for eng, res in results.items()
+                if res.get("category") in ("malicious","suspicious")
+            ][:5]
+            msg  = f"🚨 <b>TEHLİKELİ DOSYA:</b> <code>{html.escape(filename)}</code>\n\n"
+            msg += f"📊 {total} antivirüsten <b>{mal+sus}</b> tanesi zararlı buldu!\n\n"
+            msg += f"<b>Tehditler:</b>\n{html.escape(chr(10).join(threats))}\n\n"
+            msg += "⛔ Dosyayı ASLA AÇMAYIN!"
+        else:
+            msg  = f"✅ <b>Dosya Temiz:</b> <code>{html.escape(filename)}</code>\n\n"
+            msg += f"📊 {total} antivirüs taradı, hiçbir tehdit bulunamadı."
+        return msg
+    except requests.Timeout:
+        return "⏱️ VirusTotal zaman aşımına uğradı."
+    except Exception as e:
+        log.error("VT file error: %s", e)
+        return "⚠️ Dosya taranırken hata oluştu."
+
+def vt_scan_ip(ip: str) -> dict:
+    if not VT_API_KEY:
+        return {}
+    headers = {"x-apikey": VT_API_KEY}
+    try:
+        r = requests.get(f"https://www.virustotal.com/api/v3/ip_addresses/{ip}", headers=headers, timeout=10)
+        if r.status_code == 200:
+            stats = r.json()["data"]["attributes"]["last_analysis_stats"]
+            return {"malicious": stats.get("malicious", 0), "suspicious": stats.get("suspicious", 0)}
+    except:
+        pass
+    return {}
+
+# ── Data Breach (E-posta Sızıntı) ──────────────────────────────
+def check_breach(email: str) -> str:
+    try:
+        r = requests.get(f"https://api.xposedornot.com/v1/check-email/{email}", timeout=10)
+        if r.status_code == 404:
+            return f"✅ <b>Tebrikler!</b>\n\n<code>{html.escape(email)}</code> adresi hiçbir sızıntı veritabanında bulunmadı. Güvendesiniz."
+        
+        if r.status_code == 200:
+            data = r.json()
+            breaches = data.get("breaches", [[]])[0]
+            count = len(breaches)
+            
+            msg = f"🚨 <b>DİKKAT! SIZINTI TESPİT EDİLDİ!</b>\n\n"
+            msg += f"<code>{html.escape(email)}</code> adresi <b>{count}</b> farklı hacker saldırısında sızdırılmış!\n\n"
+            msg += "<b>Sızdırıldığı Bazı Siteler:</b>\n"
+            for b in breaches[:10]:
+                msg += f"• {b}\n"
+            if count > 10:
+                msg += f"...ve {count-10} site daha.\n"
+            msg += "\n⚠️ <i>Şifrelerinizi hemen değiştirmeniz tavsiye edilir!</i>"
+            return msg
+        return "⚠️ Sızıntı veritabanına bağlanılamadı."
+    except Exception as e:
+        log.error("Breach error: %s", e)
+        return "⚠️ Hata oluştu."
+
+# ── IP OSINT ───────────────────────────────────────────────────
+def check_ip(ip: str) -> str:
+    try:
+        r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,city,isp,org,query", timeout=10)
+        data = r.json()
+        if data.get("status") != "success":
+            return f"❌ <b>Hata:</b> IP adresi çözümlenemedi."
+        
+        msg = f"🌍 <b>IP Bilgi Raporu:</b> <code>{html.escape(data.get('query'))}</code>\n\n"
+        msg += f"📍 <b>Konum:</b> {data.get('city', '?')}, {data.get('country', '?')}\n"
+        msg += f"🏢 <b>İnternet Sağlayıcı:</b> {data.get('isp', '?')}\n"
+        msg += f"🏢 <b>Organizasyon:</b> {data.get('org', '?')}\n"
+
+        # VT Check
+        vt_stats = vt_scan_ip(data.get('query'))
+        if vt_stats:
+            mal = vt_stats.get("malicious", 0)
+            if mal > 0:
+                msg += f"\n🚨 <b>Güvenlik Uyarısi:</b> VirusTotal bu IP'yi {mal} kez <b>ZARARLI</b> olarak işaretlemiş!"
+            else:
+                msg += f"\n✅ <b>Güvenlik:</b> VirusTotal bu IP'de tehdit bulmadı."
+        return msg
+    except Exception as e:
+        return "⚠️ IP adresi sorgulanırken hata oluştu."
+
 # ── Instagram ──────────────────────────────────────────────────
 def ig_fetch(username: str):
     if not RAPID_API_KEY:
@@ -153,13 +275,11 @@ def build_ig_msg(data: dict):
     pic      = data.get("profile_pic_url_hd") or data.get("profile_pic_url") or ""
     website  = html.escape(str(data.get("external_url") or data.get("website") or ""))
     
-    # Yeni Detaylar
     category = html.escape(str(data.get("category_name") or data.get("category") or ""))
     is_biz   = data.get("is_business", False)
     email    = html.escape(str(data.get("public_email") or ""))
     phone    = html.escape(str(data.get("public_phone_number") or data.get("contact_phone_number") or ""))
     
-    # Çoklu Linkler
     bio_links = data.get("bio_links", [])
     extra_links = []
     for link in bio_links:
@@ -201,7 +321,7 @@ def build_ig_msg(data: dict):
         lines.append("━━━━━━━━━━━━━━━━━")
         if website:
             lines.append(f"🔗 <b>Web Sitesi:</b> {website}")
-        for idx, elink in enumerate(extra_links[:3]): # Sadece ilk 3 ekstra linki göster
+        for idx, elink in enumerate(extra_links[:3]): 
             lines.append(f"🔗 <b>Bağlantı {idx+1}:</b> {elink}")
 
     lines.append(f"\n<a href='https://www.instagram.com/{uname}/'>Profili Görüntüle</a>")
@@ -210,48 +330,41 @@ def build_ig_msg(data: dict):
 # ── KOMUTLAR ───────────────────────────────────────────────────
 
 async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/menu ve /start komutu"""
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Link Sorgula", callback_data="info_link")],
-        [InlineKeyboardButton("📸 Insta Sorgula", callback_data="info_ig")],
+        [InlineKeyboardButton("🔗 Link Sorgula", callback_data="info_link"),
+         InlineKeyboardButton("📸 Insta Sorgula", callback_data="info_ig")],
+        [InlineKeyboardButton("📧 İhlal Sorgula", callback_data="info_ihlal"),
+         InlineKeyboardButton("🌍 IP/Domain Sorgula", callback_data="info_ip")],
+        [InlineKeyboardButton("📁 Dosya/Virüs Tarama", callback_data="info_file")]
     ])
     await update.message.reply_text(
-        "👋 <b>Ana Menüye Hoş Geldiniz!</b>\n\n"
-        "Ne yapmak istersiniz?\n\n"
+        "👋 <b>Siber Güvenlik & OSINT Ana Menüsü</b>\n\n"
+        "Güçlü analiz araçlarına hoş geldiniz. Ne yapmak istersiniz?\n\n"
         "👉 <code>/ig kullanıcı_adı</code> : Instagram profil analizi\n"
+        "👉 <code>/ihlal ornek@gmail.com</code> : Veri sızıntı kontrolü\n"
+        "👉 <code>/ip adres</code> : IP veya Domain araştırması\n"
         "👉 <code>/link</code> : URL/Link güvenlik analizi\n"
-        "👉 <code>/reset</code> : Sohbet ekranını temizle",
+        "👉 <b>Sadece link/dosya atın:</b> Otomatik analiz başlasın!",
         parse_mode="HTML",
         reply_markup=kb
     )
 
 async def cmd_ig(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/ig komutu"""
     if not ctx.args:
         await update.message.reply_text(
             "📸 <b>Instagram Sorgulama Modu</b>\n\n"
-            "Lütfen komutun yanına kullanıcı adını yazın.\n\n"
-            "👉 <b>Örnek:</b> <code>/ig cristiano</code>\n"
-            "👉 <b>Örnek:</b> <code>/ig enexs.qx0</code>",
-            parse_mode="HTML"
+            "Kullanım: <code>/ig cristiano</code>", parse_mode="HTML"
         )
         return
 
     username = ctx.args[0].lstrip("@").strip()
-    msg = await update.message.reply_text(
-        f"🔍 <b>@{html.escape(username)}</b> tüm detaylarıyla sorgulanıyor...",
-        parse_mode="HTML"
-    )
+    msg = await update.message.reply_text(f"🔍 <b>@{html.escape(username)}</b> tüm detaylarıyla sorgulanıyor...", parse_mode="HTML")
 
-    import asyncio
     loop = asyncio.get_running_loop()
     try:
-        data, err = await asyncio.wait_for(
-            loop.run_in_executor(executor, ig_fetch, username),
-            timeout=15.0
-        )
+        data, err = await asyncio.wait_for(loop.run_in_executor(executor, ig_fetch, username), timeout=15.0)
     except asyncio.TimeoutError:
-        await msg.edit_text("⏱️ <b>Zaman aşımı!</b> Instagram API yanıt vermedi.", parse_mode="HTML")
+        await msg.edit_text("⏱️ <b>Zaman aşımı!</b>", parse_mode="HTML")
         return
 
     if err:
@@ -271,25 +384,40 @@ async def cmd_ig(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
 async def cmd_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/link komutu"""
     await update.message.reply_text(
-        "🔗 <b>Link Sorgulama Modu</b>\n\n"
-        "Lütfen taramak istediğiniz linki doğrudan mesaj olarak gönderin.\n\n"
-        "👉 <b>Örnek:</b> <code>https://testsafebrowsing.appspot.com/s/malware.html</code>",
+        "🔗 <b>Link Sorgulama Modu</b>\n\nBana herhangi bir linki gönderin. Kısaltılmışsa gerçek adresini bulup virüs taraması yaparım.",
         parse_mode="HTML"
     )
 
 async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/reset komutu - Telegram'da eski mesajları silmek botlar için kısıtlıdır, bu yüzden temiz bir sayfa açar."""
-    # Bot sadece kendi mesajlarını ve eğer admin yetkisi varsa silebilir.
-    # Özel mesajda kullanıcının mesajlarını silemez. Bu yüzden bol boşluk bırakarak ekranı temizliyoruz.
     blank_space = ".\n" * 50
     await update.message.reply_text(
-        f"{blank_space}🧹 <b>Sohbet Temizlendi!</b>\n\n"
-        "Menüyü görmek için /menu yazabilirsiniz.",
+        f"{blank_space}🧹 <b>Sohbet Temizlendi!</b>\n\nMenüyü görmek için /menu yazabilirsiniz.",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove()
     )
+
+async def cmd_ihlal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("📧 Kullanım: <code>/ihlal ornek@gmail.com</code>", parse_mode="HTML")
+        return
+    email = ctx.args[0].strip()
+    msg = await update.message.reply_text(f"🔍 <b>{html.escape(email)}</b> sızıntı veritabanlarında aranıyor...", parse_mode="HTML")
+    
+    loop = asyncio.get_running_loop()
+    report = await loop.run_in_executor(executor, check_breach, email)
+    await msg.edit_text(report, parse_mode="HTML")
+
+async def cmd_ip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("🌍 Kullanım: <code>/ip 1.1.1.1</code> veya <code>/ip siteadi.com</code>", parse_mode="HTML")
+        return
+    ip_addr = ctx.args[0].strip()
+    msg = await update.message.reply_text(f"🔍 <b>{html.escape(ip_addr)}</b> lokasyon ve güvenlik taraması yapılıyor...", parse_mode="HTML")
+    
+    loop = asyncio.get_running_loop()
+    report = await loop.run_in_executor(executor, check_ip, ip_addr)
+    await msg.edit_text(report, parse_mode="HTML")
 
 # ── Buton Geri Çağrıları ───────────────────────────────────────
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -297,45 +425,70 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
     if q.data == "info_link":
-        await q.edit_message_text(
-            "🔗 <b>Link Güvenlik Taraması</b>\n\n"
-            "Bana herhangi bir linki <b>mesaj olarak</b> gönderin.\n\n"
-            "Örnek:\n<code>https://suphelisite.com</code>\n\n"
-            "VirusTotal üzerinden tarayıp sonucu bildiririm.",
-            parse_mode="HTML"
-        )
+        await q.edit_message_text("🔗 Bize bir link atın, gizli adresini çözüp virüs taramasından geçirelim.")
     elif q.data == "info_ig":
-        await q.edit_message_text(
-            "📸 <b>Instagram Profil Sorgulama</b>\n\n"
-            "Komut: <code>/ig kullanici_adi</code>\n\n"
-            "Örnek:\n<code>/ig cristiano</code>",
-            parse_mode="HTML"
-        )
+        await q.edit_message_text("📸 Kullanım: `/ig kullanici_adi`", parse_mode="Markdown")
+    elif q.data == "info_ihlal":
+        await q.edit_message_text("📧 Kullanım: `/ihlal emailiniz@gmail.com`", parse_mode="Markdown")
+    elif q.data == "info_ip":
+        await q.edit_message_text("🌍 Kullanım: `/ip 8.8.8.8`", parse_mode="Markdown")
+    elif q.data == "info_file":
+        await q.edit_message_text("📁 Analiz edilmesini istediğiniz herhangi bir dosyayı, fotoğrafı veya APK'yı direkt mesaj olarak gönderin.")
 
-# ── Metin mesajları (link tarama) ──────────────────────────────
+# ── Mesaj Okuyucular (Link ve Dosya) ───────────────────────────
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     urls = find_urls(text)
 
     if not urls:
         await update.message.reply_text(
-            "ℹ️ Mesajınızda geçerli bir link bulamadım.\n\n"
-            "👉 Link taramak için <code>http://</code> ile başlayan bir mesaj atın.\n"
-            "👉 Instagram için <code>/ig kullanici_adi</code> yazın.\n"
-            "👉 Menü için /menu yazın.",
+            "ℹ️ Mesajınızda geçerli bir komut veya link bulamadım.\nMenü için /menu yazın.",
             parse_mode="HTML"
         )
         return
 
-    target = urls[0]
-    msg = await update.message.reply_text(
-        f"🔍 Link Virustotal'de analiz ediliyor...\n<code>{html.escape(target)}</code>\n\n<i>(Bu işlem yaklaşık 30 saniye sürebilir, lütfen bekleyin...)</i>",
-        parse_mode="HTML"
-    )
+    original_url = urls[0]
+    msg = await update.message.reply_text("🔍 Link kontrol ediliyor...", parse_mode="HTML")
 
-    import asyncio
-    report = await asyncio.get_event_loop().run_in_executor(executor, vt_scan, target)
+    loop = asyncio.get_running_loop()
+    # Kısaltılmış link çözücü
+    target_url = await loop.run_in_executor(executor, resolve_url, original_url)
+    
+    if target_url != original_url:
+        await msg.edit_text(f"🔗 <b>Link Çözüldü!</b>\nAsıl adres: <code>{html.escape(target_url)}</code>\n\nVirustotal'de analiz ediliyor...", parse_mode="HTML")
+    else:
+        await msg.edit_text(f"🔍 Virustotal'de analiz ediliyor...\n<code>{html.escape(target_url)}</code>\n\n<i>(Bu işlem yaklaşık 30 sn sürebilir)</i>", parse_mode="HTML")
+
+    report = await loop.run_in_executor(executor, vt_scan_url, target_url)
     await msg.edit_text(report, parse_mode="HTML")
+
+async def on_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document or update.message.photo[-1] if update.message.photo else None
+    if not doc: return
+
+    # Dosya boyutu kontrolü (Telegram API genel bot indirme limiti 20MB'dır)
+    file_size = getattr(doc, 'file_size', 0)
+    if file_size > 20 * 1024 * 1024:
+        await update.message.reply_text("⚠️ Dosya boyutu 20 MB'dan büyük olduğu için Telegram limitlerine takıldı.")
+        return
+
+    filename = getattr(doc, 'file_name', "dosya.file")
+    msg = await update.message.reply_text(f"📥 Dosya indiriliyor: <code>{html.escape(filename)}</code>", parse_mode="HTML")
+
+    try:
+        # Telegramdan dosyayı indir
+        file_obj = await ctx.bot.get_file(doc.file_id)
+        byte_array = await file_obj.download_as_bytearray()
+
+        await msg.edit_text(f"🔍 Dosya VirusTotal'e yükleniyor ve analiz ediliyor...\n\n<i>Lütfen 30-40 saniye bekleyin.</i>", parse_mode="HTML")
+        
+        loop = asyncio.get_running_loop()
+        report = await loop.run_in_executor(executor, vt_scan_file, byte_array, filename)
+        await msg.edit_text(report, parse_mode="HTML")
+
+    except Exception as e:
+        log.error("File download error: %s", e)
+        await msg.edit_text("⚠️ Dosya indirilirken veya analiz edilirken bir hata oluştu.")
 
 # ── Ana giriş noktası ──────────────────────────────────────────
 if __name__ == "__main__":
@@ -346,14 +499,17 @@ if __name__ == "__main__":
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Yeni Komutlar eklendi
     app.add_handler(CommandHandler(["start", "menu"], cmd_menu))
     app.add_handler(CommandHandler("ig", cmd_ig))
     app.add_handler(CommandHandler("link", cmd_link))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("ihlal", cmd_ihlal))
+    app.add_handler(CommandHandler("ip", cmd_ip))
     
     app.add_handler(CallbackQueryHandler(on_button))
+    # Tüm medya tipleri ve dokümanları yakalar
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, on_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    log.info("Bot başlatıldı!")
+    log.info("Siber Güvenlik Botu başlatıldı!")
     app.run_polling(drop_pending_updates=True)
