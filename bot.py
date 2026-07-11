@@ -347,7 +347,7 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
     # Yeni Komutlar eklendi
-    app.add_handler(CommandHandler(["start", "menu", "menü"], cmd_menu))
+    app.add_handler(CommandHandler(["start", "menu"], cmd_menu))
     app.add_handler(CommandHandler("ig", cmd_ig))
     app.add_handler(CommandHandler("link", cmd_link))
     app.add_handler(CommandHandler("reset", cmd_reset))
