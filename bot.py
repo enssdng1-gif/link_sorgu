@@ -15,6 +15,8 @@ from telegram.ext import (
     CallbackQueryHandler, filters
 )
 
+import instagram_ai
+
 # ── Ayarlar ────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 VT_API_KEY       = os.environ.get("VIRUSTOTAL_API_KEY", "")
@@ -340,7 +342,8 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("📸 Insta Sorgula", callback_data="info_ig")],
         [InlineKeyboardButton("📧 İhlal Sorgula", callback_data="info_ihlal"),
          InlineKeyboardButton("🌍 IP/Domain Sorgula", callback_data="info_ip")],
-        [InlineKeyboardButton("📁 Dosya/Virüs Tarama", callback_data="info_file")]
+        [InlineKeyboardButton("📁 Dosya/Virüs Tarama", callback_data="info_file")],
+        [InlineKeyboardButton("🤖 Instagram Yapay Zeka", callback_data="info_ig_ai")]
     ])
     await update.message.reply_text(
         "👋 <b>Siber Güvenlik & OSINT Ana Menüsü</b>\n\n"
@@ -349,6 +352,8 @@ async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "👉 <code>/ihlal ornek@gmail.com</code> : Veri sızıntı kontrolü\n"
         "👉 <code>/ip adres</code> : IP veya Domain araştırması\n"
         "👉 <code>/link</code> : URL/Link güvenlik analizi\n"
+        "👉 <code>/ig_mesaj [kullanıcı] [mesaj]</code> : Instagram üzerinden mesaj atar\n"
+        "👉 <code>/ig_takipci [kullanıcı]</code> : Instagram takipçilerini çeker\n"
         "👉 <b>Sadece link/dosya atın:</b> Otomatik analiz başlasın!",
         parse_mode="HTML",
         reply_markup=kb
@@ -439,6 +444,39 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🌍 Kullanım: `/ip 8.8.8.8`", parse_mode="Markdown")
     elif q.data == "info_file":
         await q.edit_message_text("📁 Analiz edilmesini istediğiniz herhangi bir dosyayı, fotoğrafı veya APK'yı direkt mesaj olarak gönderin.")
+    elif q.data == "info_ig_ai":
+        await q.edit_message_text("🤖 Instagram hesabınızdan AI ile otomatik DM kontrolü. Ayrıca /ig_mesaj ve /ig_takipci komutlarını kullanabilirsiniz.")
+
+# ── Yeni Instagram Yapay Zeka Komutları ─────────────────────────
+async def cmd_ig_mesaj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if len(ctx.args) < 2:
+        await update.message.reply_text("Kullanım: `/ig_mesaj [kullanıcı_adı] [mesajınız...]`", parse_mode="Markdown")
+        return
+        
+    username = ctx.args[0].lstrip("@")
+    text = " ".join(ctx.args[1:])
+    msg = await update.message.reply_text(f"🚀 @{username} kullanıcısına mesaj gönderiliyor...")
+    
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(executor, instagram_ai.ig_send_message, username, text)
+    await msg.edit_text(result)
+
+async def cmd_ig_takipci(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await update.message.reply_text("Kullanım: `/ig_takipci [kullanıcı_adı]`", parse_mode="Markdown")
+        return
+        
+    username = ctx.args[0].lstrip("@")
+    msg = await update.message.reply_text(f"🔍 @{username} takipçileri çekiliyor (Bu işlem biraz sürebilir)...")
+    
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(executor, instagram_ai.ig_get_followers, username)
+    
+    if isinstance(result, list):
+        text = f"👥 <b>@{username} Takipçileri (Son 20):</b>\n\n" + "\n".join(result)
+        await msg.edit_text(text, parse_mode="HTML")
+    else:
+        await msg.edit_text(result)
 
 # ── Mesaj Okuyucular (Link ve Dosya) ───────────────────────────
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -519,6 +557,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("ihlal", cmd_ihlal))
     app.add_handler(CommandHandler("ip", cmd_ip))
+    app.add_handler(CommandHandler("ig_mesaj", cmd_ig_mesaj))
+    app.add_handler(CommandHandler("ig_takipci", cmd_ig_takipci))
     
     app.add_handler(CallbackQueryHandler(on_button))
     # Tüm medya tipleri ve dokümanları yakalar
@@ -526,4 +566,12 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     log.info("Siber Güvenlik Botu başlatıldı!")
+    
+    # Kendi Telegram chat ID'nizi buraya yazabilirsiniz veya bot her mesaja cevap atabilir
+    # Güvenlik için sadece kendi chat ID'nizi bulup buraya atamalısınız ki sadece size mesaj atsın.
+    # Şimdilik None diyoruz (Böylece loglara yazar ama kimseye mesaj atmaz. Bunu ayarlamanız gerekecek).
+    admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
+    
+    instagram_ai.start_ig_listener(app.bot, admin_chat_id)
+    
     app.run_polling(drop_pending_updates=True)
