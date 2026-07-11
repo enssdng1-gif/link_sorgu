@@ -145,37 +145,39 @@ def ig_fetch(username: str):
         log.error("IG hata: %s", e)
         return None, f"⚠️ Hata: {str(e)[:80]}"
 
+import html
+
 def build_ig_msg(data: dict):
-    uname    = data.get("username") or "?"
-    name     = data.get("full_name") or data.get("fullname") or ""
-    bio      = data.get("biography") or data.get("bio") or ""
+    uname    = html.escape(str(data.get("username") or "?"))
+    name     = html.escape(str(data.get("full_name") or data.get("fullname") or ""))
+    bio      = html.escape(str(data.get("biography") or data.get("bio") or ""))
     followers= fmt_num(data.get("follower_count") or data.get("followers"))
     following= fmt_num(data.get("following_count") or data.get("following"))
     posts    = fmt_num(data.get("media_count")    or data.get("posts"))
     private  = data.get("is_private", False)
     verified = data.get("is_verified", False)
     pic      = data.get("profile_pic_url_hd") or data.get("profile_pic_url") or ""
-    website  = data.get("external_url") or data.get("website") or ""
+    website  = html.escape(str(data.get("external_url") or data.get("website") or ""))
 
     badge   = " ✅" if verified else ""
     privacy = "🔒 Gizli" if private else "🌍 Açık"
 
     lines = [
-        "📸 *Instagram Profil Raporu*",
+        "📸 <b>Instagram Profil Raporu</b>",
         "━━━━━━━━━━━━━━━━━",
-        f"👤 *Ad:* {name}{badge}",
-        f"🔖 *Kullanıcı:* @{uname}",
-        f"🔐 *Hesap:* {privacy}",
+        f"👤 <b>Ad:</b> {name}{badge}",
+        f"🔖 <b>Kullanıcı:</b> @{uname}",
+        f"🔐 <b>Hesap:</b> {privacy}",
         "━━━━━━━━━━━━━━━━━",
-        f"👥 *Takipçi:* {followers}",
-        f"➡️ *Takip:* {following}",
-        f"🖼️ *Gönderi:* {posts}",
+        f"👥 <b>Takipçi:</b> {followers}",
+        f"➡️ <b>Takip:</b> {following}",
+        f"🖼️ <b>Gönderi:</b> {posts}",
     ]
     if bio:
-        lines += ["━━━━━━━━━━━━━━━━━", f"📝 *Bio:* {bio}"]
+        lines += ["━━━━━━━━━━━━━━━━━", f"📝 <b>Bio:</b> {bio}"]
     if website:
         lines.append(f"🔗 {website}")
-    lines.append(f"\n[Profili Görüntüle](https://www.instagram.com/{uname}/)")
+    lines.append(f"\n<a href='https://www.instagram.com/{uname}/'>Profili Görüntüle</a>")
     return "\n".join(lines), pic
 
 # ── /start ─────────────────────────────────────────────────────
@@ -224,8 +226,8 @@ async def cmd_ig(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     username = ctx.args[0].lstrip("@").strip()
     msg = await update.message.reply_text(
-        f"🔍 *@{username}* sorgulanıyor...",
-        parse_mode="Markdown"
+        f"🔍 <b>@{html.escape(username)}</b> sorgulanıyor...",
+        parse_mode="HTML"
     )
 
     import asyncio
@@ -238,12 +240,14 @@ async def cmd_ig(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except asyncio.TimeoutError:
         await msg.edit_text(
             "⏱️ Instagram API 15 saniyede yanıt vermedi.\nLütfen tekrar deneyin.",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         return
 
     if err:
-        await msg.edit_text(err, parse_mode="Markdown")
+        # Hata mesajlarındaki Markdown işaretlerini temizleyelim veya HTML uyumlu gönderelim
+        err_clean = err.replace("*", "<b>").replace("❌ <b>@", "❌ <b>@").replace("</b> bulunamadı.", "</b> bulunamadı.")
+        await msg.edit_text(err_clean, parse_mode="HTML")
         return
 
     text, pic = build_ig_msg(data)
@@ -251,12 +255,12 @@ async def cmd_ig(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if pic:
         try:
-            await update.message.reply_photo(photo=pic, caption=text, parse_mode="Markdown")
+            await update.message.reply_photo(photo=pic, caption=text, parse_mode="HTML")
             return
         except Exception as e:
             log.warning("Fotoğraf gönderilemedi: %s", e)
 
-    await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=False)
+    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=False)
 
 # ── Metin mesajları (link tarama) ──────────────────────────────
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
