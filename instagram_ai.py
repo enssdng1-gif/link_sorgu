@@ -15,23 +15,27 @@ IG_PASS = os.environ.get("IG_PASSWORD", "")
 cl = Client()
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 ig_active = False
+ig_login_error = "Henüz denenmedi."
 
 # Son kontrol edilen mesajların ID'lerini tutalım ki aynı mesaja iki kez cevap atmayalım
 seen_messages = set()
 
 def init_instagram():
-    global ig_active
+    global ig_active, ig_login_error
     if not IG_USER or not IG_PASS:
-        log.warning("IG_USERNAME veya IG_PASSWORD eksik. Instagram yapay zekası başlatılmadı.")
+        ig_login_error = "IG_USERNAME veya IG_PASSWORD eksik."
+        log.warning(ig_login_error)
         return False
         
     try:
         log.info(f"Instagram'a {IG_USER} olarak giriş yapılıyor...")
         cl.login(IG_USER, IG_PASS)
         ig_active = True
+        ig_login_error = ""
         log.info("Instagram girişi başarılı!")
         return True
     except Exception as e:
+        ig_login_error = str(e)
         log.error(f"Instagram giriş hatası: {e}")
         return False
 
@@ -116,7 +120,7 @@ def start_ig_listener(telegram_bot, admin_chat_id):
 
 def ig_send_message(username: str, text: str):
     if not ig_active:
-        return "⚠️ Instagram hesabı aktif değil."
+        return f"⚠️ Instagram hesabı aktif değil.\n🛑 <b>Hata:</b> {ig_login_error}"
     try:
         user_id = cl.user_id_from_username(username)
         cl.direct_send(text, user_ids=[user_id])
@@ -126,7 +130,7 @@ def ig_send_message(username: str, text: str):
 
 def ig_get_followers(username: str):
     if not ig_active:
-        return "⚠️ Instagram hesabı aktif değil."
+        return f"⚠️ Instagram hesabı aktif değil.\n🛑 <b>Hata:</b> {ig_login_error}"
     try:
         user_id = cl.user_id_from_username(username)
         followers = cl.user_followers(user_id, amount=20) # Çok çekmek ban riskini artırır, ilk 20'yi alıyoruz
